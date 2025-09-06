@@ -4,37 +4,33 @@ import os
 from datetime import datetime, timedelta
 
 stock_bp = Blueprint('stock', __name__)
-
-# Alpha Vantage API configuration
-ALPHA_VANTAGE_API_KEY = os.environ.get('ALPHA_VANTAGE_API_KEY', 'demo')
-ALPHA_VANTAGE_BASE_URL = 'https://www.alphavantage.co/query'
+# Finnhub API configuration
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
+FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
 @stock_bp.route('/stocks/quote/<symbol>', methods=['GET'])
 def get_stock_quote(symbol):
     """Get real-time stock quote"""
     try:
         params = {
-            'function': 'GLOBAL_QUOTE',
             'symbol': symbol.upper(),
-            'apikey': ALPHA_VANTAGE_API_KEY
+            'token': FINNHUB_API_KEY
         }
         
-        response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params)
+        response = requests.get(f"{FINNHUB_BASE_URL}/quote", params=params)
         data = response.json()
         
-        if 'Global Quote' in data:
-            quote = data['Global Quote']
+        if data and data.get('c') is not None:
             return jsonify({
-                'symbol': quote.get('01. symbol', symbol),
-                'price': float(quote.get('05. price', 0)),
-                'change': float(quote.get('09. change', 0)),
-                'change_percent': quote.get('10. change percent', '0%'),
-                'volume': int(quote.get('06. volume', 0)),
-                'latest_trading_day': quote.get('07. latest trading day', ''),
-                'previous_close': float(quote.get('08. previous close', 0)),
-                'open': float(quote.get('02. open', 0)),
-                'high': float(quote.get('03. high', 0)),
-                'low': float(quote.get('04. low', 0))
+                'symbol': symbol.upper(),
+                'price': data['c'],
+                'change': data['d'],
+                'change_percent': data['dp'],
+                'high': data['h'],
+                'low': data['l'],
+                'open': data['o'],
+                'previous_close': data['pc'],
+                'timestamp': data['t']
             })
         else:
             return jsonify({'error': 'Stock not found or API limit reached'}), 404
@@ -46,59 +42,45 @@ def get_stock_quote(symbol):
 def get_historical_data(symbol):
     """Get historical stock data"""
     try:
-        # Get query parameters
-        interval = request.args.get('interval', 'daily')  # daily, weekly, monthly
-        outputsize = request.args.get('outputsize', 'compact')  # compact (100 days) or full
+        resolution = request.args.get("resolution", "D")  # 1, 5, 15, 30, 60, D, W, M
         
-        # Map interval to Alpha Vantage function
-        function_map = {
-            'daily': 'TIME_SERIES_DAILY',
-            'weekly': 'TIME_SERIES_WEEKLY',
-            'monthly': 'TIME_SERIES_MONTHLY'
-        }
+        # Finnhub requires start and end time in UNIX timestamp
+        to_timestamp = int(datetime.now().timestamp())
+        from_timestamp = int((datetime.now() - timedelta(days=365)).timestamp()) # Last 1 year of data
         
         params = {
-            'function': function_map.get(interval, 'TIME_SERIES_DAILY'),
-            'symbol': symbol.upper(),
-            'outputsize': outputsize,
-            'apikey': ALPHA_VANTAGE_API_KEY
+            "symbol": symbol.upper(),
+            "resolution": resolution,
+            "from": from_timestamp,
+            "to": to_timestamp,
+            "token": FINNHUB_API_KEY
         }
         
-        response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params)
+        response = requests.get(f"{FINNHUB_BASE_URL}/stock/candle", params=params)
+
         data = response.json()
         
-        # Find the time series key
-        time_series_key = None
-        for key in data.keys():
-            if 'Time Series' in key:
-                time_series_key = key
-                break
-        
-        if time_series_key and time_series_key in data:
-            time_series = data[time_series_key]
-            
-            # Convert to a more frontend-friendly format
+        if data and data["s"] == "ok":
             historical_data = []
-            for date, values in time_series.items():
+            for i in range(len(data["t"])):
                 historical_data.append({
-                    'date': date,
-                    'open': float(values.get('1. open', 0)),
-                    'high': float(values.get('2. high', 0)),
-                    'low': float(values.get('3. low', 0)),
-                    'close': float(values.get('4. close', 0)),
-                    'volume': int(values.get('5. volume', 0))
+                    "date": datetime.fromtimestamp(data["t"][i]).strftime("%Y-%m-%d"),
+                    "open": data["o"][i],
+                    "high": data["h"][i],
+                    "low": data["l"][i],
+                    "close": data["c"][i],
+                    "volume": data["v"][i]
                 })
             
-            # Sort by date (most recent first)
-            historical_data.sort(key=lambda x: x['date'], reverse=True)
+            historical_data.sort(key=lambda x: x["date"], reverse=True)
             
             return jsonify({
-                'symbol': symbol.upper(),
-                'interval': interval,
-                'data': historical_data
+                "symbol": symbol.upper(),
+                "resolution": resolution,
+                "data": historical_data
             })
         else:
-            return jsonify({'error': 'Historical data not found or API limit reached'}), 404
+            return jsonify({"error": "Historical data not found or API limit reached"}), 404
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -108,27 +90,20 @@ def search_stocks(query):
     """Search for stocks by symbol or company name"""
     try:
         params = {
-            'function': 'SYMBOL_SEARCH',
-            'keywords': query,
-            'apikey': ALPHA_VANTAGE_API_KEY
+            'q': query,
+            'token': FINNHUB_API_KEY
         }
         
-        response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params)
+        response = requests.get(f"{FINNHUB_BASE_URL}/search", params=params)
         data = response.json()
         
-        if 'bestMatches' in data:
+        if data and data['result']:
             matches = []
-            for match in data['bestMatches']:
+            for match in data['result']:
                 matches.append({
-                    'symbol': match.get('1. symbol', ''),
-                    'name': match.get('2. name', ''),
-                    'type': match.get('3. type', ''),
-                    'region': match.get('4. region', ''),
-                    'market_open': match.get('5. marketOpen', ''),
-                    'market_close': match.get('6. marketClose', ''),
-                    'timezone': match.get('7. timezone', ''),
-                    'currency': match.get('8. currency', ''),
-                    'match_score': float(match.get('9. matchScore', 0))
+                    'symbol': match.get('symbol', ''),
+                    'name': match.get('description', ''),
+                    'type': match.get('type', '')
                 })
             
             return jsonify({
@@ -141,50 +116,48 @@ def search_stocks(query):
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@stock_bp.route('/stocks/intraday/<symbol>', methods=['GET'])
+@stock_bp.route("/stocks/intraday/<symbol>", methods=["GET"])
 def get_intraday_data(symbol):
     """Get intraday stock data"""
     try:
-        interval = request.args.get('interval', '5min')  # 1min, 5min, 15min, 30min, 60min
+        resolution = request.args.get("resolution", "1")  # 1, 5, 15, 30, 60
+        
+        to_timestamp = int(datetime.now().timestamp())
+        from_timestamp = int((datetime.now() - timedelta(days=1)).timestamp()) # Last 1 day of data
         
         params = {
-            'function': 'TIME_SERIES_INTRADAY',
-            'symbol': symbol.upper(),
-            'interval': interval,
-            'apikey': ALPHA_VANTAGE_API_KEY
+            "symbol": symbol.upper(),
+            "resolution": resolution,
+            "from": from_timestamp,
+            "to": to_timestamp,
+            "token": FINNHUB_API_KEY
         }
         
-        response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params)
+        response = requests.get(f"{FINNHUB_BASE_URL}/stock/candle", params=params)
         data = response.json()
         
-        time_series_key = f'Time Series ({interval})'
-        
-        if time_series_key in data:
-            time_series = data[time_series_key]
-            
-            # Convert to frontend-friendly format
+        if data and data["s"] == "ok":
             intraday_data = []
-            for timestamp, values in time_series.items():
+            for i in range(len(data["t"])):
                 intraday_data.append({
-                    'timestamp': timestamp,
-                    'open': float(values.get('1. open', 0)),
-                    'high': float(values.get('2. high', 0)),
-                    'low': float(values.get('3. low', 0)),
-                    'close': float(values.get('4. close', 0)),
-                    'volume': int(values.get('5. volume', 0))
+                    "timestamp": datetime.fromtimestamp(data["t"][i]).strftime("%Y-%m-%d %H:%M:%S"),
+                    "open": data["o"][i],
+                    "high": data["h"][i],
+                    "low": data["l"][i],
+                    "close": data["c"][i],
+                    "volume": data["v"][i]
                 })
             
-            # Sort by timestamp (most recent first)
-            intraday_data.sort(key=lambda x: x['timestamp'], reverse=True)
+            intraday_data.sort(key=lambda x: x["timestamp"], reverse=True)
             
             return jsonify({
-                'symbol': symbol.upper(),
-                'interval': interval,
-                'data': intraday_data
+                "symbol": symbol.upper(),
+                "resolution": resolution,
+                "data": intraday_data
             })
         else:
-            return jsonify({'error': 'Intraday data not found or API limit reached'}), 404
+            return jsonify({"error": "Intraday data not found or API limit reached"}), 404
             
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
